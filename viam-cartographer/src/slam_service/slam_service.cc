@@ -18,6 +18,19 @@
 #include "cartographer/mapping/id.h"
 #include "cartographer/mapping/map_builder.h"
 #include "glog/logging.h"
+#include <chrono>
+
+using std::chrono::high_resolution_clock;
+using std::chrono::duration_cast;
+using std::chrono::duration;
+using std::chrono::milliseconds;
+
+void checkTime(std::chrono::_V2::system_clock::time_point t1, std::string message){
+    auto t2 = high_resolution_clock::now();
+    /* Getting number of milliseconds as a double. */
+    duration<double, std::milli> ms_double = t2 - t1;
+    std::cout << message << ms_double.count() << "ms\n";
+}
 
 namespace viam {
 
@@ -89,7 +102,7 @@ std::atomic<bool> b_continue_session{true};
 
     // Set component_reference for our response
     response->set_component_reference(camera_name);
-
+ 
     return grpc::Status::OK;
 }
 
@@ -97,6 +110,7 @@ std::atomic<bool> b_continue_session{true};
     ServerContext *context, const GetPointCloudMapRequest *request,
     GetPointCloudMapResponse *response) {
     std::string pointcloud_map;
+    auto t1 = high_resolution_clock::now();
     // Write or grab the latest pointcloud map in form of a string
     try {
         std::shared_lock optimization_lock{optimization_shared_mutex,
@@ -106,7 +120,7 @@ std::atomic<bool> b_continue_session{true};
             // We are able to lock the optimization_shared_mutex, which means
             // that the optimization is not ongoing and we can grab the newest
             // map
-            GetLatestSampledPointCloudMapString(pointcloud_map);
+            GetLatestSampledPointCloudMapString(pointcloud_map, t1);
             std::lock_guard<std::mutex> lk(viam_response_mutex);
             latest_pointcloud_map = pointcloud_map;
         } else {
@@ -138,6 +152,7 @@ std::atomic<bool> b_continue_session{true};
                                 "map pointcloud does not have points yet");
         }
         response->set_point_cloud_pcd(pointcloud_map);
+        checkTime(t1,"set GetPointCloudMapResponse: ")
         return grpc::Status::OK;
     } catch (std::exception &e) {
         std::ostringstream oss;
@@ -225,6 +240,7 @@ std::atomic<bool> b_continue_session{true};
 ::grpc::Status SLAMServiceImpl::GetCurrentPointCloudMap(
     const GetMapRequest *request, GetMapResponse *response) {
     std::string pointcloud_map;
+    auto t1 = high_resolution_clock::now();
     // Write or grab the latest pointcloud map in form of a string
     try {
         std::shared_lock optimization_lock{optimization_shared_mutex,
@@ -234,7 +250,7 @@ std::atomic<bool> b_continue_session{true};
             // We are able to lock the optimization_shared_mutex, which means
             // that the optimization is not ongoing and we can grab the newest
             // map
-            GetLatestSampledPointCloudMapString(pointcloud_map);
+            GetLatestSampledPointCloudMapString(pointcloud_map, t1);
             std::lock_guard<std::mutex> lk(viam_response_mutex);
             latest_pointcloud_map = pointcloud_map;
         } else {
@@ -280,6 +296,7 @@ std::atomic<bool> b_continue_session{true};
     ServerContext *context, const GetPointCloudMapStreamRequest *request,
     ServerWriter<GetPointCloudMapStreamResponse> *writer) {
     std::string pointcloud_map;
+    auto t1 = high_resolution_clock::now();
     // Write or grab the latest pointcloud map in form of a string
     try {
         std::shared_lock optimization_lock{optimization_shared_mutex,
@@ -288,7 +305,7 @@ std::atomic<bool> b_continue_session{true};
             // We are able to lock the optimization_shared_mutex, which means
             // that the optimization is not ongoing and we can grab the newest
             // map
-            GetLatestSampledPointCloudMapString(pointcloud_map);
+            GetLatestSampledPointCloudMapString(pointcloud_map, t1);
             std::lock_guard<std::mutex> lk(viam_response_mutex);
             latest_pointcloud_map = pointcloud_map;
         } else {
@@ -444,10 +461,11 @@ std::string SLAMServiceImpl::TryFileClose(std::ifstream &tempFile,
 }
 
 void SLAMServiceImpl::BackupLatestMap() {
+    auto t1 = high_resolution_clock::now();
     std::string jpeg_map_with_marker_tmp = GetLatestJpegMapString(true);
     std::string jpeg_map_without_marker_tmp = GetLatestJpegMapString(false);
     std::string pointcloud_map_tmp;
-    GetLatestSampledPointCloudMapString(pointcloud_map_tmp);
+    GetLatestSampledPointCloudMapString(pointcloud_map_tmp, t1);
 
     std::lock_guard<std::mutex> lk(viam_response_mutex);
     latest_jpeg_map_with_marker = std::move(jpeg_map_with_marker_tmp);
@@ -461,8 +479,9 @@ void SLAMServiceImpl::BackupLatestMap() {
 void SLAMServiceImpl::CacheMapInLocalizationMode() {
     if (action_mode == ActionMode::LOCALIZING) {
         std::string pointcloud_map_tmp;
+        auto t1 = high_resolution_clock::now();
         try {
-            GetLatestSampledPointCloudMapString(pointcloud_map_tmp);
+            GetLatestSampledPointCloudMapString(pointcloud_map_tmp, t1);
 
         } catch (std::exception &e) {
             LOG(ERROR) << "Stopping Cartographer: error encoding localized "
@@ -560,7 +579,7 @@ std::string SLAMServiceImpl::GetLatestJpegMapString(bool add_pose_marker) {
 }
 
 void SLAMServiceImpl::GetLatestSampledPointCloudMapString(
-    std::string &pointcloud) {
+    std::string &pointcloud, std::chrono::_V2::system_clock::time_point t1) {
     std::unique_ptr<cartographer::io::PaintSubmapSlicesResult> painted_slices =
         nullptr;
     try {
@@ -578,13 +597,13 @@ void SLAMServiceImpl::GetLatestSampledPointCloudMapString(
             throw std::runtime_error(errorLog);
         }
     }
-
+    checkTime(t1,"GetLatestPaintedMapSlices: ")
     auto painted_surface = painted_slices->surface.get();
     int width = cairo_image_surface_get_width(painted_surface);
     int height = cairo_image_surface_get_height(painted_surface);
     // Get all pixels from the painted surface in RGBA format
     auto data = cairo_image_surface_get_data(painted_surface);
-
+    
     // Total number of bytes in image (4 bytes per pixel)
     int size_data = width * height * 4;
 
@@ -594,7 +613,7 @@ void SLAMServiceImpl::GetLatestSampledPointCloudMapString(
     // data_vect[i + 2] is the G channel
     // data_vect[i + 3] is the A channel
     std::vector<unsigned char> data_vect(data, data + size_data);
-
+    checkTime(t1,"Copy data from GetLatestPaintedMapSlices to vector: ")
     int num_points = 0;
 
     // Sample the image based on the number of pixels. Output is the number of
@@ -651,12 +670,13 @@ void SLAMServiceImpl::GetLatestSampledPointCloudMapString(
                                                rotated_map_point.z());
         viam::utils::writeIntToBufferInBytes(data_buffer, prob);
     }
-
+    checkTime(t1,"filter and encode PointCloud: ")
     // Write our PCD file, which is written as a binary.
     pointcloud = viam::utils::pcdHeader(num_points, true);
 
     // Writes data buffer to the pointcloud string
     pointcloud += data_buffer;
+    checkTime(t1,"Finish GetLatestSampledPointCloudMapString: ")
     return;
 }
 
